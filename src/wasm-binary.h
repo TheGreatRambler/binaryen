@@ -1252,145 +1252,10 @@ enum class ValueWritten {
   InlineBufferSize,
 };
 
-// Writes out wasm to the binary format
-
-class WasmBinaryWriter {
-  // Computes the indexes in a wasm binary, i.e., with function imports
-  // and function implementations sharing a single index space, etc.,
-  // and with the imports first (the Module's functions and globals
-  // arrays are not assumed to be in a particular order, so we can't
-  // just use them directly).
-  struct BinaryIndexes {
-    std::unordered_map<Name, Index> functionIndexes;
-    std::unordered_map<Name, Index> tagIndexes;
-    std::unordered_map<Name, Index> globalIndexes;
-    std::unordered_map<Name, Index> tableIndexes;
-    std::unordered_map<Name, Index> elemIndexes;
-
-    BinaryIndexes(Module& wasm) {
-      auto addIndexes = [&](auto& source, auto& indexes) {
-        auto addIndex = [&](auto* curr) {
-          auto index = indexes.size();
-          indexes[curr->name] = index;
-        };
-        for (auto& curr : source) {
-          if (curr->imported()) {
-            addIndex(curr.get());
-          }
-        }
-        for (auto& curr : source) {
-          if (!curr->imported()) {
-            addIndex(curr.get());
-          }
-        }
-      };
-      addIndexes(wasm.functions, functionIndexes);
-      addIndexes(wasm.tags, tagIndexes);
-      addIndexes(wasm.tables, tableIndexes);
-
-      for (auto& curr : wasm.elementSegments) {
-        auto index = elemIndexes.size();
-        elemIndexes[curr->name] = index;
-      }
-
-      // Globals may have tuple types in the IR, in which case they lower to
-      // multiple globals, one for each tuple element, in the binary. Tuple
-      // globals therefore occupy multiple binary indices, and we have to take
-      // that into account when calculating indices.
-      Index globalCount = 0;
-      auto addGlobal = [&](auto* curr) {
-        globalIndexes[curr->name] = globalCount;
-        globalCount += curr->type.size();
-      };
-      for (auto& curr : wasm.globals) {
-        if (curr->imported()) {
-          addGlobal(curr.get());
-        }
-      }
-      for (auto& curr : wasm.globals) {
-        if (!curr->imported()) {
-          addGlobal(curr.get());
-        }
-      }
-    }
-  };
-
+class DefaultWasmBinaryWriter {
 public:
-  WasmBinaryWriter(Module* input, BufferWithRandomAccess& o)
-    : wasm(input), o(o), indexes(*input) {
-    prepare();
-  }
-
-  // locations in the output binary for the various parts of the module
-  struct TableOfContents {
-    struct Entry {
-      Name name;
-      size_t offset; // where the entry starts
-      size_t size;   // the size of the entry
-      Entry(Name name, size_t offset, size_t size)
-        : name(name), offset(offset), size(size) {}
-    };
-    std::vector<Entry> functionBodies;
-  } tableOfContents;
-
-  void setNamesSection(bool set) {
-    debugInfo = set;
-    emitModuleName = set;
-  }
-  void setEmitModuleName(bool set) { emitModuleName = set; }
-  void setSourceMap(std::ostream* set, std::string url) {
-    sourceMap = set;
-    sourceMapUrl = url;
-  }
-  void setSymbolMap(std::string set) { symbolMap = set; }
-
-  void write();
-  void writeHeader();
-  int32_t writeU32LEBPlaceholder();
-  void writeResizableLimits(
-    Address initial, Address maximum, bool hasMaximum, bool shared, bool is64);
-  template<typename T> int32_t startSection(T code);
-  void finishSection(int32_t start);
-  int32_t startSubsection(BinaryConsts::UserSections::Subsection code);
-  void finishSubsection(int32_t start);
-  void writeStart();
-  void writeMemory();
-  void writeTypes();
-  void writeImports();
-
-  void writeFunctionSignatures();
-  void writeExpression(Expression* curr);
-  void writeFunctions();
-  void writeGlobals();
-  void writeExports();
-  void writeDataCount();
-  void writeDataSegments();
-  void writeTags();
-
-  uint32_t getFunctionIndex(Name name) const;
-  uint32_t getTableIndex(Name name) const;
-  uint32_t getGlobalIndex(Name name) const;
-  uint32_t getTagIndex(Name name) const;
-  uint32_t getTypeIndex(HeapType type) const;
-
-  void writeTableDeclarations();
-  void writeElementSegments();
-  void writeNames();
-  void writeSourceMapUrl();
-  void writeSymbolMap();
-  void writeLateUserSections();
-  void writeUserSection(const UserSection& section);
-  void writeFeaturesSection();
-  void writeDylinkSection();
-  void writeLegacyDylinkSection();
-
-  void initializeDebugInfo();
-  void writeSourceMapProlog();
-  void writeSourceMapEpilog();
-  void writeDebugLocation(const Function::DebugLocation& loc);
-  void writeDebugLocation(Expression* curr, Function* func);
-  void writeDebugLocationEnd(Expression* curr, Function* func);
-  void writeExtraDebugLocation(Expression* curr, Function* func, size_t id);
+  DefaultWasmBinaryWriter(BufferWithRandomAccess& o, Module* wasm)
+    : o(o), wasm(wasm) {}
 
   template<ValueWritten VT, typename T = int> void writeValue(T value = 0) {
     if constexpr (VT == ValueWritten::Magic) {
@@ -1456,142 +1321,197 @@ public:
       o << U32LEB(value);
     }
   }
+
+  void writeInlineString(const char* name) {
+    int32_t size = strlen(name);
+    o << U32LEB(size);
+    writeData(name, size);
+  }
+
+  void writeData(const char* data, size_t size) {
+    for (size_t i = 0; i < size; i++) {
+      o << int8_t(data[i]);
+    }
+  }
+
+  void writeResizableLimits(
+    Address initial, Address maximum, bool hasMaximum, bool shared, bool is64) {
+    uint32_t flags = (hasMaximum ? (uint32_t)BinaryConsts::HasMaximum : 0U) |
+                     (shared ? (uint32_t)BinaryConsts::IsShared : 0U) |
+                     (is64 ? (uint32_t)BinaryConsts::Is64 : 0U);
+
+    o << U32LEB(flags);
+    if (is64) {
+      o << U64LEB(initial);
+      if (hasMaximum) {
+        o << U64LEB(maximum);
+      }
+    } else {
+      o << U32LEB(initial);
+      if (hasMaximum) {
+        o << U32LEB(maximum);
+      }
+    }
+  }
+
   int32_t streamOffset() { return o.size(); }
+
   void streamResize(int32_t size) { o.resize(size); }
+
   size_t streamWrite(size_t loc, int32_t value) {
     return o.writeAt(loc, U32LEB(value));
   }
-  size_t streamAdjustSectionLEB(int32_t start);
-  void streamAdjustFunctionLEB(Function* func,
-                               size_t start,
-                               size_t size,
-                               size_t sizePos,
-                               size_t sourceMapSize);
 
-  // helpers
-  void writeInlineString(const char* name);
-  void writeEscapedName(const char* name);
-  void writeInlineBuffer(const char* data, size_t size);
-  void writeData(const char* data, size_t size);
+  void streamMove(size_t start, size_t end, size_t dest) {
+    std::move(o.data() + start, o.data() + end, o.data() + dest);
+  }
 
-  struct Buffer {
-    const char* data;
-    size_t size;
-    size_t pointerLocation;
-    Buffer(const char* data, size_t size, size_t pointerLocation)
-      : data(data), size(size), pointerLocation(pointerLocation) {}
-  };
-
-  Module* getModule() { return wasm; }
-
-  void writeType(Type type);
-
-  // Writes an arbitrary heap type, which may be indexed or one of the
-  // basic types like funcref.
-  void writeHeapType(HeapType type);
-  // Writes an indexed heap type. Note that this is encoded differently than a
-  // general heap type because it does not allow negative values for basic heap
-  // types.
-  void writeIndexedHeapType(HeapType type);
-
-  void writeField(const Field& field);
-
-protected:
-  Module* wasm;
+private:
   BufferWithRandomAccess& o;
-  BinaryIndexes indexes;
-  ModuleUtils::IndexedHeapTypes indexedTypes;
-
-  bool debugInfo = true;
-
-  // TODO: Remove `emitModuleName` in the future once there are better ways to
-  // ensure modules have meaningful names in stack traces.For example, using
-  // ObjectURLs works in FireFox, but not Chrome. See
-  // https://bugs.chromium.org/p/v8/issues/detail?id=11808.
-  bool emitModuleName = true;
-
-  std::ostream* sourceMap = nullptr;
-  std::string sourceMapUrl;
-  std::string symbolMap;
-
-  MixedArena allocator;
-
-  // storage of source map locations until the section is placed at its final
-  // location (shrinking LEBs may cause changes there)
-  std::vector<std::pair<size_t, const Function::DebugLocation*>>
-    sourceMapLocations;
-  size_t sourceMapLocationsSizeAtSectionStart;
-  Function::DebugLocation lastDebugLocation;
-
-  std::unique_ptr<ImportInfo> importInfo;
-
-  // General debugging info: track locations as we write.
-  BinaryLocations binaryLocations;
-  size_t binaryLocationsSizeAtSectionStart;
-  // Track the expressions that we added for the current function being
-  // written, so that we can update those specific binary locations when
-  // the function is written out.
-  std::vector<Expression*> binaryLocationTrackedExpressionsForFunc;
-
-  // Maps function names to their mapped locals. This is used when we emit the
-  // local names section: we map the locals when writing the function, save that
-  // info here, and then use it when writing the names.
-  std::unordered_map<Name, MappedLocals> funcMappedLocals;
-
-  void prepare();
+  Module* wasm;
 };
 
-class WasmBinaryBuilder {
-  Module& wasm;
-  MixedArena& allocator;
-  const std::vector<char>& input;
-  std::istream* sourceMap;
-  std::pair<uint32_t, Function::DebugLocation> nextDebugLocation;
-  bool debugInfo = true;
-  bool DWARF = false;
-  bool skipFunctionBodies = false;
-
-  size_t pos = 0;
-  Index startIndex = -1;
-  std::set<Function::DebugLocation> debugLocation;
-  size_t codeSectionLocation;
-
-  std::set<BinaryConsts::Section> seenSections;
-
-  // All types defined in the type section
-  std::vector<HeapType> types;
-
+class DefaultWasmBinaryReader {
 public:
-  WasmBinaryBuilder(Module& wasm,
-                    FeatureSet features,
-                    const std::vector<char>& input);
+  DefaultWasmBinaryReader(const std::vector<char>& input, Module& wasm)
+    : input(input), wasm(wasm) {}
 
-  void setDebugInfo(bool value) { debugInfo = value; }
-  void setDWARF(bool value) { DWARF = value; }
-  void setSkipFunctionBodies(bool skipFunctionBodies_) {
-    skipFunctionBodies = skipFunctionBodies_;
+  uint8_t getInt8() {
+    if (!more()) {
+      throwError("unexpected end of input");
+    }
+    BYN_TRACE("getInt8: " << (int)(uint8_t)input[pos] << " (at " << pos
+                          << ")\n");
+    return input[pos++];
   }
-  void read();
-  void readUserSection(size_t payloadLen);
 
-  bool more() { return pos < input.size(); }
+  uint16_t getInt16() {
+    BYN_TRACE("<==\n");
+    auto ret = uint16_t(getInt8());
+    ret |= uint16_t(getInt8()) << 8;
+    BYN_TRACE("getInt16: " << ret << "/0x" << std::hex << ret << std::dec
+                           << " ==>\n");
+    return ret;
+  }
 
-  std::pair<const char*, const char*> getByteView(size_t size);
-  uint8_t getInt8();
-  uint16_t getInt16();
-  uint32_t getInt32();
-  uint64_t getInt64();
-  uint8_t getLaneIndex(size_t lanes);
+  uint32_t getInt32() {
+    BYN_TRACE("<==\n");
+    auto ret = uint32_t(getInt16());
+    ret |= uint32_t(getInt16()) << 16;
+    BYN_TRACE("getInt32: " << ret << "/0x" << std::hex << ret << std::dec
+                           << " ==>\n");
+    return ret;
+  }
+
+  uint64_t getInt64() {
+    BYN_TRACE("<==\n");
+    auto ret = uint64_t(getInt32());
+    ret |= uint64_t(getInt32()) << 32;
+    BYN_TRACE("getInt64: " << ret << "/0x" << std::hex << ret << std::dec
+                           << " ==>\n");
+    return ret;
+  }
+
+  uint8_t getLaneIndex(size_t lanes) {
+    BYN_TRACE("<==\n");
+    auto ret = getInt8();
+    if (ret >= lanes) {
+      throwError("Illegal lane index");
+    }
+    BYN_TRACE("getLaneIndex(" << lanes << "): " << ret << " ==>" << std::endl);
+    return ret;
+  }
+
   // it is unsafe to return a float directly, due to ABI issues with the
   // signalling bit
-  Literal getFloat32Literal();
-  Literal getFloat64Literal();
-  Literal getVec128Literal();
-  uint32_t getU32LEB();
-  uint64_t getU64LEB();
-  int32_t getS32LEB();
-  int64_t getS64LEB();
-  uint64_t getUPtrLEB();
+  Literal getFloat32Literal() {
+    BYN_TRACE("<==\n");
+    auto ret = Literal(getInt32());
+    ret = ret.castToF32();
+    BYN_TRACE("getFloat32: " << ret << " ==>\n");
+    return ret;
+  }
+
+  Literal getFloat64Literal() {
+    BYN_TRACE("<==\n");
+    auto ret = Literal(getInt64());
+    ret = ret.castToF64();
+    BYN_TRACE("getFloat64: " << ret << " ==>\n");
+    return ret;
+  }
+
+  Literal getVec128Literal() {
+    BYN_TRACE("<==\n");
+    std::array<uint8_t, 16> bytes;
+    for (auto i = 0; i < 16; ++i) {
+      bytes[i] = getInt8();
+    }
+    auto ret = Literal(bytes.data());
+    BYN_TRACE("getVec128: " << ret << " ==>\n");
+    return ret;
+  }
+
+  uint32_t getU32LEB() {
+    BYN_TRACE("<==\n");
+    U32LEB ret;
+    ret.read([&]() { return getInt8(); });
+    BYN_TRACE("getU32LEB: " << ret.value << " ==>\n");
+    return ret.value;
+  }
+
+  uint64_t getU64LEB() {
+    BYN_TRACE("<==\n");
+    U64LEB ret;
+    ret.read([&]() { return getInt8(); });
+    BYN_TRACE("getU64LEB: " << ret.value << " ==>\n");
+    return ret.value;
+  }
+
+  int32_t getS32LEB() {
+    BYN_TRACE("<==\n");
+    S32LEB ret;
+    ret.read([&]() { return (int8_t)getInt8(); });
+    BYN_TRACE("getS32LEB: " << ret.value << " ==>\n");
+    return ret.value;
+  }
+
+  int64_t getS64LEB() {
+    BYN_TRACE("<==\n");
+    S64LEB ret;
+    ret.read([&]() { return (int8_t)getInt8(); });
+    BYN_TRACE("getS64LEB: " << ret.value << " ==>\n");
+    return ret.value;
+  }
+
+  void verifyInt8(int8_t x) {
+    int8_t y = getInt8();
+    if (x != y) {
+      throwError("surprising value");
+    }
+  }
+
+  void verifyInt16(int16_t x) {
+    int16_t y = getInt16();
+    if (x != y) {
+      throwError("surprising value");
+    }
+  }
+
+  void verifyInt32(int32_t x) {
+    int32_t y = getInt32();
+    if (x != y) {
+      throwError("surprising value");
+    }
+  }
+
+  void verifyInt64(int64_t x) {
+    int64_t y = getInt64();
+    if (x != y) {
+      throwError("surprising value");
+    }
+  }
+
+  void throwError(std::string text) { throw ParseException(text, 0, pos); }
 
   template<ValueWritten VT, typename I = int> auto getValue(I inputValue = 0) {
     WASM_UNUSED(inputValue);
@@ -1648,6 +1568,324 @@ public:
     }
   }
 
+  Name getInlineString() {
+    BYN_TRACE("<==\n");
+    auto len = getU32LEB();
+
+    auto data = getByteView(len);
+
+    std::string str(data.first, data.second);
+    if (str.find('\0') != std::string::npos) {
+      throwError(
+        "inline string contains NULL (0). that is technically valid in wasm, "
+        "but you shouldn't do it, and it's not supported in binaryen");
+    }
+    BYN_TRACE("getInlineString: " << str << " ==>\n");
+    return Name(str);
+  }
+
+  void getResizableLimits(Address& initial,
+                          Address& max,
+                          bool& shared,
+                          Type& indexType,
+                          Address defaultIfNoMax) {
+    auto flags = getU32LEB();
+    bool hasMax = (flags & BinaryConsts::HasMaximum) != 0;
+    bool isShared = (flags & BinaryConsts::IsShared) != 0;
+    bool is64 = (flags & BinaryConsts::Is64) != 0;
+    initial = is64 ? getU64LEB() : getU32LEB();
+    if (isShared && !hasMax) {
+      throwError("shared memory must have max size");
+    }
+    shared = isShared;
+    indexType = is64 ? Type::i64 : Type::i32;
+    if (hasMax) {
+      max = is64 ? getU64LEB() : getU32LEB();
+    } else {
+      max = defaultIfNoMax;
+    }
+  }
+
+  std::pair<const char*, const char*> getByteView(size_t size) {
+    if (size > input.size() || pos > input.size() - size) {
+      throwError("unexpected end of input");
+    }
+    pos += size;
+    return {input.data() + (pos - size), input.data() + pos};
+  }
+
+  bool more() { return pos < input.size(); }
+  char peek() { return input[pos]; }
+  size_t getPos() { return pos; }
+  void setPos(size_t newPos) { pos = newPos; }
+  size_t getSize() { return input.size(); }
+
+private:
+  const std::vector<char>& input;
+  Module& wasm;
+  size_t pos = 0;
+};
+
+// Writes out wasm to the binary format
+
+template<class IO = DefaultWasmBinaryWriter> class WasmBinaryWriter {
+  // Computes the indexes in a wasm binary, i.e., with function imports
+  // and function implementations sharing a single index space, etc.,
+  // and with the imports first (the Module's functions and globals
+  // arrays are not assumed to be in a particular order, so we can't
+  // just use them directly).
+  struct BinaryIndexes {
+    std::unordered_map<Name, Index> functionIndexes;
+    std::unordered_map<Name, Index> tagIndexes;
+    std::unordered_map<Name, Index> globalIndexes;
+    std::unordered_map<Name, Index> tableIndexes;
+    std::unordered_map<Name, Index> elemIndexes;
+
+    BinaryIndexes(Module& wasm) {
+      auto addIndexes = [&](auto& source, auto& indexes) {
+        auto addIndex = [&](auto* curr) {
+          auto index = indexes.size();
+          indexes[curr->name] = index;
+        };
+        for (auto& curr : source) {
+          if (curr->imported()) {
+            addIndex(curr.get());
+          }
+        }
+        for (auto& curr : source) {
+          if (!curr->imported()) {
+            addIndex(curr.get());
+          }
+        }
+      };
+      addIndexes(wasm.functions, functionIndexes);
+      addIndexes(wasm.tags, tagIndexes);
+      addIndexes(wasm.tables, tableIndexes);
+
+      for (auto& curr : wasm.elementSegments) {
+        auto index = elemIndexes.size();
+        elemIndexes[curr->name] = index;
+      }
+
+      // Globals may have tuple types in the IR, in which case they lower to
+      // multiple globals, one for each tuple element, in the binary. Tuple
+      // globals therefore occupy multiple binary indices, and we have to take
+      // that into account when calculating indices.
+      Index globalCount = 0;
+      auto addGlobal = [&](auto* curr) {
+        globalIndexes[curr->name] = globalCount;
+        globalCount += curr->type.size();
+      };
+      for (auto& curr : wasm.globals) {
+        if (curr->imported()) {
+          addGlobal(curr.get());
+        }
+      }
+      for (auto& curr : wasm.globals) {
+        if (!curr->imported()) {
+          addGlobal(curr.get());
+        }
+      }
+    }
+  };
+
+public:
+  template<class T>
+  WasmBinaryWriter(Module* input, T& output)
+    : binaryIO(IO(output, input)), wasm(input), indexes(*input) {
+    prepare();
+  }
+
+  // locations in the output binary for the various parts of the module
+  struct TableOfContents {
+    struct Entry {
+      Name name;
+      size_t offset; // where the entry starts
+      size_t size;   // the size of the entry
+      Entry(Name name, size_t offset, size_t size)
+        : name(name), offset(offset), size(size) {}
+    };
+    std::vector<Entry> functionBodies;
+  } tableOfContents;
+
+  void setNamesSection(bool set) {
+    debugInfo = set;
+    emitModuleName = set;
+  }
+  void setEmitModuleName(bool set) { emitModuleName = set; }
+  void setSourceMap(std::ostream* set, std::string url) {
+    sourceMap = set;
+    sourceMapUrl = url;
+  }
+  void setSymbolMap(std::string set) { symbolMap = set; }
+
+  void write();
+  void writeHeader();
+  int32_t writeU32LEBPlaceholder();
+  template<typename T> int32_t startSection(T code);
+  void finishSection(int32_t start);
+  int32_t startSubsection(BinaryConsts::UserSections::Subsection code);
+  void finishSubsection(int32_t start);
+  void writeStart();
+  void writeMemory();
+  void writeTypes();
+  void writeImports();
+
+  void writeFunctionSignatures();
+  void writeExpression(Expression* curr);
+  void writeFunctions();
+  void writeGlobals();
+  void writeExports();
+  void writeDataCount();
+  void writeDataSegments();
+  void writeTags();
+
+  uint32_t getFunctionIndex(Name name) const;
+  uint32_t getTableIndex(Name name) const;
+  uint32_t getGlobalIndex(Name name) const;
+  uint32_t getTagIndex(Name name) const;
+  uint32_t getTypeIndex(HeapType type) const;
+
+  void writeTableDeclarations();
+  void writeElementSegments();
+  void writeNames();
+  void writeSourceMapUrl();
+  void writeSymbolMap();
+  void writeLateUserSections();
+  void writeUserSection(const UserSection& section);
+  void writeFeaturesSection();
+  void writeDylinkSection();
+  void writeLegacyDylinkSection();
+
+  void initializeDebugInfo();
+  void writeSourceMapProlog();
+  void writeSourceMapEpilog();
+  void writeDebugLocation(const Function::DebugLocation& loc);
+  void writeDebugLocation(Expression* curr, Function* func);
+  void writeDebugLocationEnd(Expression* curr, Function* func);
+  void writeExtraDebugLocation(Expression* curr, Function* func, size_t id);
+
+  template<ValueWritten VT, typename T = int> void writeValue(T value = 0) {
+    binaryIO.template writeValue<VT>(value);
+  }
+  size_t streamAdjustSectionLEB(int32_t start);
+  void streamAdjustFunctionLEB(Function* func,
+                               size_t start,
+                               size_t size,
+                               size_t sizePos,
+                               size_t sourceMapSize);
+
+  // helpers
+  void writeEscapedName(const char* name);
+  void writeInlineBuffer(const char* data, size_t size);
+
+  struct Buffer {
+    const char* data;
+    size_t size;
+    size_t pointerLocation;
+    Buffer(const char* data, size_t size, size_t pointerLocation)
+      : data(data), size(size), pointerLocation(pointerLocation) {}
+  };
+
+  Module* getModule() { return wasm; }
+
+  void writeType(Type type);
+
+  // Writes an arbitrary heap type, which may be indexed or one of the
+  // basic types like funcref.
+  void writeHeapType(HeapType type);
+  // Writes an indexed heap type. Note that this is encoded differently than a
+  // general heap type because it does not allow negative values for basic heap
+  // types.
+  void writeIndexedHeapType(HeapType type);
+
+  void writeField(const Field& field);
+
+private:
+  IO binaryIO;
+
+  Module* wasm;
+  BinaryIndexes indexes;
+  ModuleUtils::IndexedHeapTypes indexedTypes;
+
+  bool debugInfo = true;
+
+  // TODO: Remove `emitModuleName` in the future once there are better ways to
+  // ensure modules have meaningful names in stack traces.For example, using
+  // ObjectURLs works in FireFox, but not Chrome. See
+  // https://bugs.chromium.org/p/v8/issues/detail?id=11808.
+  bool emitModuleName = true;
+
+  std::ostream* sourceMap = nullptr;
+  std::string sourceMapUrl;
+  std::string symbolMap;
+
+  MixedArena allocator;
+
+  // storage of source map locations until the section is placed at its final
+  // location (shrinking LEBs may cause changes there)
+  std::vector<std::pair<size_t, const Function::DebugLocation*>>
+    sourceMapLocations;
+  size_t sourceMapLocationsSizeAtSectionStart;
+  Function::DebugLocation lastDebugLocation;
+
+  std::unique_ptr<ImportInfo> importInfo;
+
+  // General debugging info: track locations as we write.
+  BinaryLocations binaryLocations;
+  size_t binaryLocationsSizeAtSectionStart;
+  // Track the expressions that we added for the current function being
+  // written, so that we can update those specific binary locations when
+  // the function is written out.
+  std::vector<Expression*> binaryLocationTrackedExpressionsForFunc;
+
+  // Maps function names to their mapped locals. This is used when we emit the
+  // local names section: we map the locals when writing the function, save that
+  // info here, and then use it when writing the names.
+  std::unordered_map<Name, MappedLocals> funcMappedLocals;
+
+  void prepare();
+};
+
+template<class IO = DefaultWasmBinaryReader> class WasmBinaryBuilder {
+  Module& wasm;
+  MixedArena& allocator;
+  IO binaryIO;
+  std::istream* sourceMap;
+  std::pair<uint32_t, Function::DebugLocation> nextDebugLocation;
+  bool debugInfo = true;
+  bool DWARF = false;
+  bool skipFunctionBodies = false;
+
+  Index startIndex = -1;
+  std::set<Function::DebugLocation> debugLocation;
+  size_t codeSectionLocation;
+
+  std::set<BinaryConsts::Section> seenSections;
+
+  // All types defined in the type section
+  std::vector<HeapType> types;
+
+public:
+  template<class T>
+  WasmBinaryBuilder(Module& wasm, FeatureSet features, T& input)
+    : wasm(wasm), allocator(wasm.allocator), binaryIO(IO(input, wasm)),
+      sourceMap(nullptr), nextDebugLocation(0, {0, 0, 0}), debugLocation() {
+    wasm.features = features;
+  }
+
+  void setDebugInfo(bool value) { debugInfo = value; }
+  void setDWARF(bool value) { DWARF = value; }
+  void setSkipFunctionBodies(bool skipFunctionBodies_) {
+    skipFunctionBodies = skipFunctionBodies_;
+  }
+  void read();
+  void readUserSection(size_t payloadLen);
+
+  template<ValueWritten VT, typename I = int> auto getValue(I inputValue = 0) {
+    return binaryIO.template getValue<VT>(inputValue);
+  }
+
   bool getBasicType(int32_t code, Type& out);
   bool getBasicHeapType(int64_t code, HeapType& out);
   // Read a value and get a type for it.
@@ -1658,11 +1896,6 @@ public:
   HeapType getIndexedHeapType();
 
   Type getConcreteType();
-  Name getInlineString();
-  void verifyInt8(int8_t x);
-  void verifyInt16(int16_t x);
-  void verifyInt32(int32_t x);
-  void verifyInt64(int64_t x);
   void readHeader();
   void readStart();
   void readMemory();
@@ -1674,11 +1907,6 @@ public:
   Name getGlobalName(Index index);
   Name getTagName(Index index);
 
-  void getResizableLimits(Address& initial,
-                          Address& max,
-                          bool& shared,
-                          Type& indexType,
-                          Address defaultIfNoMax);
   void readImports();
 
   // The signatures of each function, including imported functions, given in the
@@ -1858,7 +2086,7 @@ public:
   // Gets a block of expressions. If it's just one, return that singleton.
   Expression* getBlockOrSingleton(Type type);
 
-  BreakTarget getBreakTarget(int32_t offset);
+  auto getBreakTarget(int32_t offset);
   Name getExceptionTargetName(int32_t offset);
 
   void readMemoryAccess(Address& alignment, Address& offset);

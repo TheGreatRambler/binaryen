@@ -35,10 +35,10 @@ struct RoundTrip : public Pass {
     // to tell the builder which features to build with.
     auto features = module->features;
     // Write, clear, and read the module
-    WasmBinaryWriter(module, buffer).write();
+    WasmBinaryWriter<>(module, buffer).write();
     ModuleUtils::clearModule(*module);
     auto input = buffer.getAsChars();
-    WasmBinaryBuilder parser(*module, features, input);
+    WasmBinaryBuilder<> parser(*module, features, input);
     parser.setDWARF(runner->options.debugInfo);
     try {
       parser.read();

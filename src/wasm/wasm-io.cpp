@@ -51,7 +51,7 @@ void ModuleReader::readBinaryData(std::vector<char>& input,
   std::unique_ptr<std::ifstream> sourceMapStream;
   // Assume that the wasm has had its initial features applied, and use those
   // while parsing.
-  WasmBinaryBuilder parser(wasm, wasm.features, input);
+  WasmBinaryBuilder<> parser(wasm, wasm.features, input);
   parser.setDebugInfo(debugInfo);
   parser.setDWARF(DWARF);
   parser.setSkipFunctionBodies(skipFunctionBodies);
@@ -136,7 +136,7 @@ void ModuleWriter::writeText(Module& wasm, std::string filename) {
 
 void ModuleWriter::writeBinary(Module& wasm, Output& output) {
   BufferWithRandomAccess buffer;
-  WasmBinaryWriter writer(&wasm, buffer);
+  WasmBinaryWriter<> writer(&wasm, buffer);
   // if debug info is used, then we want to emit the names section
   writer.setNamesSection(debugInfo);
   if (emitModuleName) {

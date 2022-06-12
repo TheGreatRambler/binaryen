@@ -365,7 +365,7 @@ SExpressionWasmBuilder::SExpressionWasmBuilder(Module& wasm,
       }
     }
     // TODO: support applying features here
-    WasmBinaryBuilder binaryBuilder(wasm, FeatureSet::MVP, data);
+    WasmBinaryBuilder<> binaryBuilder(wasm, FeatureSet::MVP, data);
     binaryBuilder.read();
     return;
   }

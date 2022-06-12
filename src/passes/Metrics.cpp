@@ -89,7 +89,7 @@ struct Metrics
       printCounts("global");
       // compute binary info, so we know function sizes
       BufferWithRandomAccess buffer;
-      WasmBinaryWriter writer(module, buffer);
+      WasmBinaryWriter<> writer(module, buffer);
       writer.write();
       // print for each function
       Index binaryIndex = 0;
@@ -110,7 +110,7 @@ struct Metrics
         runner.addDefaultGlobalOptimizationPostPasses(); // remove stuff
         runner.run();
         BufferWithRandomAccess buffer;
-        WasmBinaryWriter writer(module, buffer);
+        WasmBinaryWriter<> writer(module, buffer);
         writer.write();
         return buffer.size();
       };

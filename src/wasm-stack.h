@@ -83,9 +83,10 @@ public:
   Type type;
 };
 
-class BinaryInstWriter : public OverriddenVisitor<BinaryInstWriter> {
+template<class IO>
+class BinaryInstWriter : public OverriddenVisitor<BinaryInstWriter<IO>> {
 public:
-  BinaryInstWriter(WasmBinaryWriter& parent,
+  BinaryInstWriter(WasmBinaryWriter<IO>& parent,
                    Function* func,
                    bool sourceMap,
                    bool DWARF)
@@ -95,10 +96,14 @@ public:
     if (func && !sourceMap) {
       parent.writeDebugLocation(curr, func);
     }
-    OverriddenVisitor<BinaryInstWriter>::visit(curr);
+    OverriddenVisitor<BinaryInstWriter<IO>>::visit(curr);
     if (func && !sourceMap) {
       parent.writeDebugLocationEnd(curr, func);
     }
+  }
+
+  template<ValueWritten VT, typename T = int> void writeValue(T value = 0) {
+    parent.template writeValue<VT>(value);
   }
 
 #define DELEGATE(CLASS_TO_VISIT)                                               \
@@ -124,7 +129,7 @@ private:
   void emitMemoryAccess(size_t alignment, size_t bytes, uint32_t offset);
   int32_t getBreakIndex(Name name);
 
-  WasmBinaryWriter& parent;
+  WasmBinaryWriter<IO>& parent;
   Function* func = nullptr;
   bool sourceMap;
   bool DWARF;
@@ -364,18 +369,20 @@ template<typename SubType> void BinaryenIRWriter<SubType>::visitTry(Try* curr) {
 }
 
 // Binaryen IR to binary writer
+template<class IO>
 class BinaryenIRToBinaryWriter
-  : public BinaryenIRWriter<BinaryenIRToBinaryWriter> {
+  : public BinaryenIRWriter<BinaryenIRToBinaryWriter<IO>> {
 public:
-  BinaryenIRToBinaryWriter(WasmBinaryWriter& parent,
+  BinaryenIRToBinaryWriter(WasmBinaryWriter<IO>& parent,
                            Function* func = nullptr,
                            bool sourceMap = false,
                            bool DWARF = false)
-    : BinaryenIRWriter<BinaryenIRToBinaryWriter>(func), parent(parent),
-      writer(parent, func, sourceMap, DWARF), sourceMap(sourceMap) {}
+    : BinaryenIRWriter<BinaryenIRToBinaryWriter<IO>>(func), parent(parent),
+      writer(parent, func, sourceMap, DWARF), sourceMap(sourceMap), func(func) {
+  }
 
   void visit(Expression* curr) {
-    BinaryenIRWriter<BinaryenIRToBinaryWriter>::visit(curr);
+    BinaryenIRWriter<BinaryenIRToBinaryWriter<IO>>::visit(curr);
   }
 
   void emit(Expression* curr) { writer.visit(curr); }
@@ -406,9 +413,10 @@ public:
   MappedLocals& getMappedLocals() { return writer.mappedLocals; }
 
 private:
-  WasmBinaryWriter& parent;
-  BinaryInstWriter writer;
+  WasmBinaryWriter<IO>& parent;
+  BinaryInstWriter<IO> writer;
   bool sourceMap;
+  Function* func;
 };
 
 // Binaryen IR to stack IR converter
@@ -452,9 +460,9 @@ private:
 };
 
 // Stack IR to binary writer
-class StackIRToBinaryWriter {
+template<class IO> class StackIRToBinaryWriter {
 public:
-  StackIRToBinaryWriter(WasmBinaryWriter& parent, Function* func)
+  StackIRToBinaryWriter(WasmBinaryWriter<IO>& parent, Function* func)
     : writer(parent, func, false /* sourceMap */, false /* DWARF */),
       func(func) {}
 
@@ -463,7 +471,7 @@ public:
   MappedLocals& getMappedLocals() { return writer.mappedLocals; }
 
 private:
-  BinaryInstWriter writer;
+  BinaryInstWriter<IO> writer;
   Function* func;
 };
 

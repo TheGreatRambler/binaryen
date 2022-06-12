@@ -4056,7 +4056,7 @@ static BinaryenBufferSizes writeModule(BinaryenModuleRef module,
                                        char* sourceMap,
                                        size_t sourceMapSize) {
   BufferWithRandomAccess buffer;
-  WasmBinaryWriter writer((Module*)module, buffer);
+  WasmBinaryWriter<> writer((Module*)module, buffer);
   writer.setNamesSection(globalPassOptions.debugInfo);
   std::ostringstream os;
   if (sourceMapUrl) {
@@ -4126,7 +4126,7 @@ BinaryenModuleAllocateAndWriteResult
 BinaryenModuleAllocateAndWrite(BinaryenModuleRef module,
                                const char* sourceMapUrl) {
   BufferWithRandomAccess buffer;
-  WasmBinaryWriter writer((Module*)module, buffer);
+  WasmBinaryWriter<> writer((Module*)module, buffer);
   writer.setNamesSection(globalPassOptions.debugInfo);
   std::ostringstream os;
   if (sourceMapUrl) {
@@ -4181,7 +4181,7 @@ BinaryenModuleRef BinaryenModuleRead(char* input, size_t inputSize) {
   std::copy_n(input, inputSize, buffer.begin());
   try {
     // TODO: allow providing features in the C API
-    WasmBinaryBuilder parser(*wasm, FeatureSet::MVP, buffer);
+    WasmBinaryBuilder<> parser(*wasm, FeatureSet::MVP, buffer);
     parser.read();
   } catch (ParseException& p) {
     p.dump(std::cerr);
